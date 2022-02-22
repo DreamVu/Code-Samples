@@ -1,28 +1,25 @@
 /*
 
-CODE SAMPLE # 011: Object Tracking
-This code will grab the basic stereo panoramas (left and right images) and ALSO the Disparity panorama, execute tracking for objects on it and then display in an opencv window
+CODE SAMPLE # 013: Object Tracking With GPIO compatibilty
+This code will grab the 360 rgb data, do object tracking and toggle GPIO pins of the Nvidia board.
 
 
 >>>>>> Compile this code using the following command....
 
 
-g++ 011_object_tracking.cpp /usr/src/tensorrt/bin/common/logger.o ../lib/libPAL.so ../lib/libPAL_CAMERA.so  ../lib/libPAL_DEPTH_HQ.so ../lib/libPAL_DEPTH_128.so  ../lib/libPAL_DE.so libPAL_Track.so `pkg-config --libs --cflags opencv`   -g  -o 011_object_tracking.out -I../include/ -I/usr/local/include/eigen3     -lv4l2 -lpthread -lcudart -L/usr/local/cuda/lib64 -lnvinfer -lnvvpi -lnvparsers -lnvinfer_plugin -lnvonnxparser -lmyelin -lnvrtc -lcudart -lcublas -lcudnn -lrt -ldl
+g++ 013_object_tracking_GPIO.cpp /usr/src/tensorrt/bin/common/logger.o ../lib/libPAL.so ../lib/libPAL_CAMERA.so  ../lib/libPAL_DEPTH_HQ.so ../lib/libPAL_DEPTH_128.so  ../lib/libPAL_DE.so ../lib/libPAL_EDET.so  ../lib/libPAL_Track.so  `pkg-config --libs --cflags opencv`   -O3  -o 013_object_tracking_GPIO.out -I../include/ -lv4l2 -lcudart -L/usr/local/cuda/lib64 -lnvinfer -lnvvpi -lnvparsers -lnvinfer_plugin -lnvonnxparser -lmyelin -lnvrtc -lcudart -lcublas -lcudnn -lrt -ldl -lJetsonGPIO -lpthread -w
+
 
 
 >>>>>> Execute the binary file by typing the following command...
 
-
-./011_object_tracking.out
+./013_object_tracking_GPIO.out
 
 
 >>>>>> KEYBOARD CONTROLS:
 
-	   ESC key closes the window
-	   	Press v/V key to toggle the vertical flip of panorama
-		Press f/F to toggle filter rgb property.
-		Press d/D to toggle fast depth property
-		Press r/R to toggle near range property
+	Press Ctrl+C key to exit the code sample
+
 
 */
 
@@ -33,6 +30,15 @@ g++ 011_object_tracking.cpp /usr/src/tensorrt/bin/common/logger.o ../lib/libPAL.
 # include <bits/stdc++.h>
 # include "PAL.h"
 #include <JetsonGPIO.h>
+#include "unistd.h"
+
+// Linux headers
+# include <fcntl.h> // Contains file controls like O_RDWR
+# include <errno.h> // Error integer and strerror() function
+# include <termios.h> // Contains POSIX terminal control definitions
+# include <unistd.h> // write(), read(), close()
+
+
 
 static bool g_bExit = false;
 
@@ -72,7 +78,7 @@ namespace PAL
 
 int main(int argc, char *argv[])
 {
-   	
+	
 	signal(SIGINT, signalHandler);
 
 	PAL::Internal::EnableDepth(false);
@@ -87,15 +93,41 @@ int main(int argc, char *argv[])
 	GPIO::setup(camera_pin_2, GPIO::OUT, GPIO::LOW);
 	GPIO::setup(camera_pin_3, GPIO::OUT, GPIO::LOW); 
 
+
+
+
 	//setting detection pin inactive by default
 	GPIO::setup(detection_pin, GPIO::OUT, GPIO::HIGH);
 
-	int width, height;
-	if (PAL::Init(width, height, -1) != PAL::SUCCESS) //Connect to the PAL camera
+
+
+	cv::VideoCapture cap;
+
+	while(!cap.open("/dev/pal5")) 
 	{
-		printf("Init failed\n");
+		cout << "\n\n[INFO] CAMERA NOT CONNECTED, CONNECT THE CAMERA \n\n" << endl;
+		system("clear");
+		
+		GPIO::output(camera_pin, 1);
+		GPIO::output(camera_pin_1, 1);
+		GPIO::output(camera_pin_2, 1);
+		GPIO::output(camera_pin_3, 1);
+		GPIO::output(detection_pin, 1);
+	}
+	
+	cap.release();
+	
+	int width, height;
+	while(PAL::Init(width, height, -1) != PAL::SUCCESS) //Connect to the PAL camera
+	{
+		printf("\n[INFO] Init Failed\n");
 		return 1;
 	}
+	GPIO::output(camera_pin, 0);
+	GPIO::output(camera_pin_1, 0);
+	GPIO::output(camera_pin_2, 0);
+	GPIO::output(camera_pin_3, 0);
+
 
 	PAL::CameraProperties data; 
 	PAL::Acknowledgement ack = PAL::LoadProperties("../Explorer/SavedPalProperties.txt", &data);
@@ -136,18 +168,42 @@ int main(int argc, char *argv[])
 
 	bool bDetectionPinActive = false;
 
+
+	int factor = 0; 
+	PAL::Acknowledgement cam_ack;
 	//27 = esc key. Run the loop until the ESC key is pressed
-	while(!g_bExit)
+	while (!g_bExit)
 	{
+
+
+		
 		PAL::Image left, right, depth, disparity;
 		Mat img, d;
 		if (useDepth)
-			PAL::GrabFrames(&left, &right, &depth);
+			cam_ack = PAL::GrabFrames(&left, &right, &depth);
 		else
-			PAL::GrabFrames(&left, &right);
+			cam_ack = PAL::GrabFrames(&left, &right);
+		
+		if(cam_ack == PAL::Acknowledgement::FAILURE)
+		{
+			GPIO::output(camera_pin, 1);
+			GPIO::output(camera_pin_1, 1);
+			GPIO::output(camera_pin_2, 1);
+			GPIO::output(camera_pin_3, 1);
+			GPIO::output(detection_pin, 1);
+			PAL::CameraStatus();
+			GPIO::output(camera_pin, 0);
+			GPIO::output(camera_pin_1, 0);
+			GPIO::output(camera_pin_2, 0);
+			GPIO::output(camera_pin_3, 0);
+			continue;
+		}
 		
 		//Convert PAL::Image to Mat
 		img = Mat(left.rows, left.cols, CV_8UC3, left.Raw.u8_data);
+
+
+
 		if (useDepth)
 		{
 			d = Mat(depth.rows, depth.cols, CV_32FC1, depth.Raw.f32_data);
@@ -157,14 +213,16 @@ int main(int argc, char *argv[])
 			d = cv::Mat::zeros(cv::Size(1, 1), CV_32FC1);
 		}
 		
+
 		num = PAL::RunTrack(img, d, boxes, ids, depthValues, colours);
+
 
 		if(num)
 		{
 			if(!bDetectionPinActive)
 			{
 				cout<<"Setting GPIO detection pin active"<<endl;
-				GPIO::setup(detection_pin, GPIO::OUT, GPIO::LOW);
+				GPIO::output(detection_pin, 0);
 
 				bDetectionPinActive = true;
 			}
@@ -175,18 +233,21 @@ int main(int argc, char *argv[])
 			if(bDetectionPinActive)
 			{
 				cout<<"Setting GPIO detection pin inactive"<<endl;
-				GPIO::setup(detection_pin, GPIO::OUT, GPIO::HIGH);
-
+				GPIO::output(detection_pin, 1);
 				bDetectionPinActive = false;
 			}
 
 		}
 
+
+		
 		boxes.clear();
 		ids.clear();
 		if(useDepth)
-			depthValues.clear();
+		depthValues.clear();
 		colours.clear();
+		
+		//Wait for the keypress - with a timeout of 1 ms
 		
 		
 	}
